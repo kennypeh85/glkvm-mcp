@@ -1,0 +1,29 @@
+[project]
+name = "glkvm-mcp"
+version = "0.1.0"
+description = "MCP server for the GL.iNet GLKVM (RM1 / RM10 / Comet) device, with a fix for the firmware double-typing / stuck-key bug baked into the keyboard tools."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Kenny Peh" }]
+keywords = ["mcp", "glkvm", "pikvm", "kvm", "claude", "anthropic", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: System :: Hardware",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "mcp[cli]>=1.2",
+    "websockets>=12",
+    "httpx>=0.27",
+]
+
+[project.urls]
+Homepage   = "https://github.com/kennypeh85/glkvm-mcp"
+Issues     = "https://github.com/kennypeh85/glkvm-mcp/issues"
+Source     = "https://github.com/kennypeh85/glkvm-mcp"
+Upstream   = "https://github.com/gl-inet/glkvm"

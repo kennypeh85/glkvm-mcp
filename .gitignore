@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.eggs/
+
+# uv
+.uv/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local backups created during install
+*.bak
+*.bak.*
