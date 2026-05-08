@@ -3,8 +3,7 @@
 A [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes a
 [GL.iNet GLKVM](https://www.gl-inet.com/products/gl-kvm/) (RM1 / RM10 / Comet) device's
 keyboard, mouse, and screenshot capabilities to MCP-capable hosts (Claude Desktop,
-Cowork, etc.) -- with a built-in mitigation for the firmware <= 1.9.0 "stuck key /
-double typing" bug.
+Cowork, etc.) 
 
 ## Why this exists
 
@@ -151,4 +150,4 @@ MIT -- see [LICENSE](LICENSE).
   of [PiKVM](https://github.com/pikvm/pikvm))
 * MCP / FastMCP: <https://modelcontextprotocol.io>
 
-This project is **not** affiliated with GL.iNet or Anthropic.
+This project is **not** affiliated with GL.iNet
