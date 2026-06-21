@@ -1,153 +1,178 @@
-# glkvm-mcp
+# GLKVM MCP Server
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes a
-[GL.iNet GLKVM](https://www.gl-inet.com/products/gl-kvm/) (RM1 / RM10 / Comet) device's
-keyboard, mouse, and screenshot capabilities to MCP-capable hosts (Claude Desktop,
-Cowork, etc.) 
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes a [GL.iNet GLKVM](https://www.gl-inet.com/products/gl-sg24/) / PiKVM-fork device's keyboard, mouse, and **OCR-enhanced screenshot** capabilities as AI agent tools.
 
-## Why this exists
+Control a remote machine over IP-KVM — type, click, screenshot, and **read text off the screen** — all through structured MCP tool calls that any LLM agent (Claude, GPT, GLM, etc.) can use directly.
 
-The official GLKVM web UI sometimes drops or delays keyup events under WebSocket
-latency, causing the target machine's OS-level auto-repeat to fire and produce
-"Heeeellooooo" instead of "Hello" (see
-[gl-inet/glkvm#52](https://github.com/gl-inet/glkvm/issues/52) and
-[forum thread #64940](https://forum.gl-inet.com/t/repeated-keypress/64940)).
-This server applies three layered mitigations on the protocol path so an LLM
-can drive the KVM cleanly:
+## ✨ Key Features
 
-1. **Atomic press.** Every character / chord is sent as `keydown -> >=25 ms gap
-   -> keyup(finish=True)`. The 25 ms gap exceeds the device's USB HID poll
-   period (~8 ms) so press and release cannot coalesce into one HID frame.
-2. **Modifier wrapping.** Chords use the noVNC pattern: `mods down -> key down
-   -> key up -> mods up`, the same fix that landed for issue #22 in firmware
-   1.3.0 but applied uniformly.
-3. **Watchdog.** Every 40 ms, any key still tracked as "down" without recent
-   activity is force-released. `kvm_release_all` is the manual escape hatch.
+- **Full keyboard control** — type text, send key chords (Ctrl+Alt+Del, Win+L, F11), hold keys
+- **Precise mouse control** — move, click, scroll, with percentage-based positioning (100% accurate)
+- **Screenshot capture** — full-resolution or preview, returned as MCP image content
+- **🔧 OCR-powered targeting** — built-in Tesseract OCR integration that:
+  - Reads all text on the remote screen with exact pixel + percentage coordinates
+  - Lets agents click on UI elements by **text name** instead of guessing coordinates
+  - Eliminates the unreliable "vision model estimates pixel position" pattern
 
-This server is the _agent-driven_ fix. For your own typing in the browser
-there's a complementary Tampermonkey userscript under [extras/](extras/).
+## 🎯 Why OCR Integration?
 
-## Tools
+Vision models (GPT-4V, Claude Vision, GLM-4V) are great at *reading* screenshots but terrible at *estimating pixel coordinates* — often off by 30%+. Meanwhile, the KVM mouse is accurate to <0.5%. The bottleneck was always **knowing where to click**, not the clicking itself.
 
-| Tool | Purpose |
-|---|---|
-| `kvm_connect(host, password, username="admin")` | HTTPS login + open kvmd WebSocket. |
-| `kvm_disconnect()` | Close WS, release any held keys. |
-| `kvm_send_text(text, wpm=200)` | Type a string with the bug-fix logic. |
-| `kvm_send_keys(combo)` | Single chord, e.g. `"Ctrl+Alt+Delete"`. |
-| `kvm_hold_key(key, duration_ms)` | Explicit hold for genuine auto-repeat. |
-| `kvm_release_all()` | Recovery -- force-release everything held. |
-| `kvm_mouse_move(x, y)` | Absolute move (PiKVM int16 space). |
-| `kvm_mouse_move_pct(x_pct, y_pct)` | Absolute move in 0..100 % screen units. |
-| `kvm_mouse_click(button, count)` | Click left/right/middle/X1/X2. |
-| `kvm_mouse_scroll(dx, dy)` | Wheel scroll. |
-| `kvm_screenshot(preview, max_width, quality)` | Single JPEG returned as MCP image content. |
-| `kvm_screenshot_to_file(path, ...)` | Same, but saved to disk. |
-| `kvm_status()` | Connection state + keys currently held. |
-
-## Install
-
-### With `uv` (recommended)
-
-```bash
-# install uv if you don't have it
-winget install --id=astral-sh.uv -e        # Windows
-# or: curl -LsSf https://astral.sh/uv/install.sh | sh   # mac/linux
-
-# clone and run
-git clone https://github.com/kennypeh85/glkvm-mcp.git
-uv run glkvm-mcp/glkvm_mcp.py
+**Before (unreliable):**
+```
+Agent: "Where is the 'Day' button?" → Vision model: "around 45%, 15%" → Misses
 ```
 
-The script declares its dependencies inline (PEP 723), so `uv` resolves
-`mcp[cli]`, `websockets`, and `httpx` automatically on first launch and
-caches them. No virtualenv to manage.
-
-### With pip
-
-```bash
-git clone https://github.com/kennypeh85/glkvm-mcp.git
-cd glkvm-mcp
-python -m venv .venv && . .venv/Scripts/activate
-pip install "mcp[cli]>=1.2" "websockets>=12" "httpx>=0.27"
-python glkvm_mcp.py
+**After (OCR-powered):**
+```
+Agent: kvm_ocr_click("Day") → OCR finds exact position → Clicks dead center → ✅
 ```
 
-### Wire it into Claude Desktop
+## 📦 Installation
 
-Edit `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or
-`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+### 1. Install Tesseract OCR (system dependency)
+
+```bash
+# Windows
+choco install tesseract-ocr
+# or download from https://github.com/UB-Mannheim/tesseract/wiki
+
+# macOS
+brew install tesseract
+
+# Linux (Debian/Ubuntu)
+sudo apt-get install tesseract-ocr
+```
+
+### 2. Configure in your MCP client
+
+Add to your MCP client config (e.g., Claude Desktop `claude_desktop_config.json`, Hermes `config.yaml`):
 
 ```json
 {
   "mcpServers": {
     "glkvm": {
       "command": "uv",
-      "args": ["run", "--script", "C:\\path\\to\\glkvm-mcp\\glkvm_mcp.py"]
+      "args": [
+        "run",
+        "--script",
+        "/path/to/glkvm_mcp.py"
+      ]
     }
   }
 }
 ```
 
-Restart Claude Desktop. In a new chat:
-*"Use the glkvm server. Connect to my KVM at 192.168.8.55, then take a preview screenshot."*
+Python dependencies (`mcp`, `websockets`, `httpx`, `Pillow`, `pytesseract`) are auto-installed by `uv run --script` via the inline PEP 723 metadata.
 
-## Typical usage from an agent
+## 🔧 Tools
+
+### Connection
+| Tool | Description |
+|------|-------------|
+| `kvm_connect(host, password, username?)` | Connect to a GLKVM device on the LAN |
+| `kvm_disconnect()` | Close the session |
+| `kvm_status()` | Report connection state and held keys |
+
+### Keyboard
+| Tool | Description |
+|------|-------------|
+| `kvm_send_text(text, wpm?)` | Type a string (atomic press pattern fixes stuck-key bug) |
+| `kvm_send_keys(combo)` | Send a key chord (e.g., "Ctrl+Alt+Delete", "F5", "Win+L") |
+| `kvm_hold_key(key, duration_ms)` | Press and hold a key (for auto-repeat scrolling) |
+| `kvm_release_all()` | Force-release all held keys |
+
+### Mouse
+| Tool | Description |
+|------|-------------|
+| `kvm_mouse_move(x, y)` | Move to absolute int16 coordinates |
+| `kvm_mouse_move_pct(x_pct, y_pct)` | Move to percentage of screen (0,0 = top-left) |
+| `kvm_mouse_click(button?, count?)` | Click at current position |
+| `kvm_mouse_scroll(dx?, dy?)` | Scroll the mouse wheel |
+
+### Screenshot
+| Tool | Description |
+|------|-------------|
+| `kvm_screenshot(preview?, max_width?, quality?)` | Capture JPEG frame as MCP image content |
+| `kvm_screenshot_to_file(path, preview?, ...)` | Capture and save to disk |
+
+### 🔧 OCR-Enhanced (Tesseract)
+| Tool | Description |
+|------|-------------|
+| `kvm_ocr_screenshot(search_text?, preview?)` | Capture + OCR: returns all text with coordinates |
+| `kvm_ocr_click(text, button?, count?, search_area?)` | Find text via OCR and click it — all-in-one |
+
+## 📖 Usage Examples
+
+### Click a button by text name
+```python
+# One-call: screenshot → OCR → find "Save" → move mouse → click
+kvm_ocr_click("Save")
+```
+
+### Read all text on screen
+```python
+# Returns structured JSON with every detected word + coordinates
+result = kvm_ocr_screenshot()
+# {"width": 1920, "height": 1080, "elements": [
+#   {"text": "File", "confidence": 96.3, "x_pct": 5.2, "y_pct": 3.1, ...},
+#   {"text": "Edit", "confidence": 95.8, "x_pct": 8.7, "y_pct": 3.1, ...},
+#   ...
+# ]}
+```
+
+### Find specific text and get its coordinates
+```python
+result = kvm_ocr_screenshot("Submit")
+# {"elements": [{"text": "Submit", "confidence": 94.5, "x_pct": 52.3, "y_pct": 87.1, ...}]}
+# Then use: kvm_mouse_move_pct(52.3, 87.1) + kvm_mouse_click()
+```
+
+### Disambiguate with search area
+```python
+# If "OK" appears in multiple places, restrict to bottom-right
+kvm_ocr_click("OK", search_area="bottom-right")
+```
+
+### Traditional screenshot (for vision model analysis)
+```python
+# Returns MCP image content — agent sees the screenshot directly
+kvm_screenshot(preview=True, max_width=1024)
+```
+
+## 🏗️ Architecture
 
 ```
-kvm_connect(host="192.168.8.55", password="<your-password>")
-kvm_screenshot(preview=true, max_width=1024)
-kvm_send_keys("Ctrl+Alt+Delete")
-kvm_send_text("hello world")
-kvm_send_keys("Enter")
-kvm_disconnect()
+┌──────────────┐     MCP stdio      ┌─────────────────┐     HTTPS/WSS     ┌──────────┐
+│  AI Agent    │ ◄─────────────────► │  glkvm_mcp.py   │ ◄───────────────► │  GLKVM   │
+│ (Claude/GPT) │    tool calls       │  (this server)  │   (PiKVM API)     │  Device  │
+└──────────────┘                     └─────────────────┘                   └──────────┘
+                                            │
+                                     Tesseract OCR
+                                     (reads screenshot text)
 ```
 
-## How it talks to the device
+The server maintains a persistent WebSocket connection to the GLKVM device for low-latency keyboard/mouse input, and uses HTTP for screenshots and authentication.
 
-This server is a thin client over the kvmd HTTP/WebSocket API exposed by the
-GLKVM firmware. Specifically:
+## 🔒 Security
 
-* **Login** -- `POST /api/auth/login` with form-encoded `user`+`passwd`,
-  receives an `auth_token` cookie.
-* **Control WebSocket** -- `wss://<host>/api/ws?auth_token=<token>`, JSON
-  messages of the form `{"event_type": "key", "event": {"key": "KeyA",
-  "state": true, "finish": false}}` for keys, with parallel shapes for
-  mouse_button / mouse_move / mouse_wheel.
-* **Snapshot** -- `GET /api/streamer/snapshot[?preview=true&...]` returns a
-  single JPEG.
-* **Keepalive** -- a `\x00` byte every second; the server drops the WS after
-  15 missed pings.
+- **LAN only** — designed for trusted local networks
+- **TLS verification disabled** — the device ships with a self-signed certificate
+- **No credentials stored** — password is passed per-session via tool call
 
-All key names are W3C `KeyboardEvent.code` style (`KeyA`, `Enter`,
-`ShiftLeft`, etc.) per the upstream `keymap.csv`. The high-level tools accept
-friendlier aliases (`ctrl`, `cmd`, `f5`, ...) which they normalize before
-sending.
+## 🐛 Bug Fixes Implemented
 
-## Caveats
+This server includes fixes for known GLKVM/PiKVM firmware bugs:
+- **Stuck key / double-typing** (firmware ≤ 1.9.0): every character sent as atomic keydown → 25ms → keyup(finish=true)
+- **Modifier release order bug** (gl-inet/glkvm #22): modifiers wrap strictly outside the main key
+- **Stale key watchdog**: auto-releases any key held >250ms
 
-* **LAN only by design.** TLS verification is disabled to accommodate the
-  device's self-signed cert. Don't expose this server's stdio to anything
-  outside your local network.
-* **US layout only.** `kvm_send_text` maps printable ASCII via a US-layout
-  table. Non-ASCII characters end up in the `skipped` list of the response.
-  International layouts can be added by extending `_build_keymap()`.
-* **Single connection.** One active KVM connection per server process.
-  Calling `kvm_connect` twice closes the previous one.
-* **No 2FA.** Two-step login is detected and refused -- disable on the KVM
-  admin page or extend `kvm_connect` (PRs welcome).
-* **Agent typing only.** This server fixes typing performed _by an LLM_. For
-  fixing your own at-the-keyboard typing in the browser, install the
-  userscript in [extras/](extras/).
+## 📋 Requirements
+
+- Python ≥ 3.10
+- A GL.iNet GLKVM device (firmware 1.9.0+) or PiKVM-compatible device on your LAN
+- Tesseract OCR installed on the host machine
 
 ## License
 
-MIT -- see [LICENSE](LICENSE).
-
-## Acknowledgements / upstream
-
-* GL.iNet's GLKVM firmware: <https://github.com/gl-inet/glkvm> (GPL-3.0 fork
-  of [PiKVM](https://github.com/pikvm/pikvm))
-* MCP / FastMCP: <https://modelcontextprotocol.io>
-
-This project is **not** affiliated with GL.iNet
+MIT

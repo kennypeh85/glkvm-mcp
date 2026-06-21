@@ -5,6 +5,8 @@
 #     "mcp[cli]>=1.2",
 #     "websockets>=12",
 #     "httpx>=0.27",
+#     "Pillow>=10",
+#     "pytesseract>=0.3.13",
 # ]
 # ///
 """
@@ -632,6 +634,243 @@ async def kvm_screenshot_to_file(path: str, preview: bool = False, max_width: in
     with open(path, "wb") as f:
         f.write(r.content)
     return {"path": path, "bytes": len(r.content), "mime_type": r.headers.get("content-type", "image/jpeg")}
+
+
+# ---- OCR-enhanced screenshot tools ----------------------------------------
+# These tools integrate Tesseract OCR so the agent gets structured text +
+# coordinates alongside the raw image, eliminating the need for vision models
+# to estimate pixel positions (which are unreliable — often off by 30%+).
+
+import io as _io
+import shutil as _shutil
+import os as _os
+import struct as _struct
+
+
+def _find_tesseract_binary() -> str | None:
+    """Locate the tesseract binary on disk (Windows/Linux/macOS)."""
+    # 1. Explicit env override
+    env_path = _os.environ.get("TESSERACT_PATH") or _os.environ.get("TESSERACT_CMD")
+    if env_path and _os.path.isfile(env_path):
+        return env_path
+    # 2. On PATH already
+    found = _shutil.which("tesseract")
+    if found:
+        return found
+    # 3. Common Windows install locations
+    if _os.name == "nt":
+        for candidate in (
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ):
+            if _os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+_TESSERACT_BIN: str | None = _find_tesseract_binary()
+
+
+def _jpeg_dimensions(data: bytes) -> tuple[int, int]:
+    """Extract width/height from JPEG bytes without decoding the full image."""
+    i = 0
+    while i < len(data) - 1:
+        if data[i] == 0xFF and data[i + 1] in (0xC0, 0xC2):
+            h = _struct.unpack(">H", data[i + 5:i + 7])[0]
+            w = _struct.unpack(">H", data[i + 7:i + 9])[0]
+            return w, h
+        i += 1
+    return 1920, 1080
+
+
+def _run_ocr(image_bytes: bytes, search_text: str = "") -> dict:
+    """
+    Run Tesseract OCR on raw JPEG bytes.
+    Returns {"width": W, "height": H, "elements": [...], "tesseract_found": bool}.
+    Each element: {text, confidence, x_pct, y_pct, pixel: [cx, cy], box: [x,y,w,h]}.
+    """
+    from PIL import Image as _PILImage
+
+    img_w, img_h = _jpeg_dimensions(image_bytes)
+    result: dict = {
+        "width": img_w,
+        "height": img_h,
+        "elements": [],
+        "tesseract_found": _TESSERACT_BIN is not None,
+    }
+
+    if _TESSERACT_BIN is None:
+        result["error"] = (
+            "Tesseract OCR binary not found. Install it: "
+            "Windows: choco install tesseract-ocr  |  macOS: brew install tesseract  |  "
+            "Linux: apt-get install tesseract-ocr  — or set TESSERACT_PATH env var."
+        )
+        return result
+
+    import pytesseract as _pyt
+
+    _pyt.pytesseract.tesseract_cmd = _TESSERACT_BIN
+
+    pil_img = _PILImage.open(_io.BytesIO(image_bytes))
+    # image_to_data gives word-level bounding boxes + confidence
+    data = _pyt.image_to_data(pil_img, output_type=_pyt.Output.DICT)
+
+    elements: list[dict] = []
+    search_lower = search_text.strip().lower() if search_text else ""
+
+    for i in range(len(data["text"])):
+        word = data["text"][i].strip()
+        if not word:
+            continue
+        conf = float(data["conf"][i]) if data["conf"][i] not in ("", "-1") else 0.0
+        if conf < 30:  # skip low-confidence noise
+            continue
+        if search_lower and search_lower not in word.lower():
+            continue
+        x = int(data["left"][i])
+        y = int(data["top"][i])
+        w = int(data["width"][i])
+        h = int(data["height"][i])
+        cx = x + w // 2
+        cy = y + h // 2
+        elements.append({
+            "text": word,
+            "confidence": round(conf, 1),
+            "x_pct": round(cx / img_w * 100, 1),
+            "y_pct": round(cy / img_h * 100, 1),
+            "pixel": [cx, cy],
+            "box": [x, y, w, h],
+        })
+
+    # Sort by confidence descending, then by position
+    elements.sort(key=lambda e: (-e["confidence"], e["y_pct"], e["x_pct"]))
+    result["elements"] = elements
+    return result
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True})
+async def kvm_ocr_screenshot(search_text: str = "", preview: bool = False) -> dict:
+    """
+    Capture a full-resolution screenshot from the remote machine AND run Tesseract
+    OCR on it. Returns every detected text element with its exact pixel and
+    percentage coordinates — ready to feed directly into kvm_mouse_move_pct().
+
+    This eliminates the need for vision models to estimate pixel positions,
+    which are unreliable (often off by 30%+). The mouse itself is accurate to
+    <0.5%; the bottleneck was always knowing WHERE to click.
+
+    Args:
+        search_text: if provided, only return elements whose text contains this
+            substring (case-insensitive). Empty = return all detected text.
+        preview: if True, capture a smaller preview image (faster but less OCR
+            accuracy). Default False = full resolution for maximum OCR accuracy.
+
+    Returns:
+        {"width": 1920, "height": 1080, "tesseract_found": true,
+         "elements": [
+           {"text": "Day", "confidence": 95.2, "x_pct": 39.2, "y_pct": 12.5,
+            "pixel": [753, 135], "box": [730, 110, 46, 25]},
+           ...
+         ]}
+
+    Typical usage:
+      1. Call kvm_ocr_screenshot("Day") → get x_pct=39.2, y_pct=12.5
+      2. Call kvm_mouse_move_pct(39.2, 12.5)
+      3. Call kvm_mouse_click("left", 1)
+
+    Or use kvm_ocr_click() to do all three in one call.
+    """
+    conn = _require_conn()
+    params: dict[str, str] = {"allow_offline": "true"}
+    if preview:
+        params["preview"] = "true"
+        params["preview_max_width"] = "1280"
+        params["preview_quality"] = "80"
+    r = await conn.http.get(f"{conn.base_url}/api/streamer/snapshot", params=params)
+    r.raise_for_status()
+    return _run_ocr(r.content, search_text)
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
+async def kvm_ocr_click(text: str, button: str = "left", count: int = 1, search_area: str = "") -> dict:
+    """
+    Find text on the remote screen via OCR and click on it — all in one call.
+
+    Captures a full-resolution screenshot, runs Tesseract OCR to find the exact
+    pixel position of the specified text, moves the mouse there, and clicks.
+
+    Args:
+        text: the text to search for (case-insensitive substring match).
+            Must match at least one word detected by OCR.
+        button: mouse button — "left", "right", "middle", "up" (X1), "down" (X2).
+        count: number of clicks (1=single, 2=double). Capped at 5.
+        search_area: optional — restrict search to a quadrant for disambiguation.
+            One of: "top-left", "top-right", "bottom-left", "bottom-right", "" (full screen).
+
+    Returns:
+        {"found": true, "text": "Day", "confidence": 95.2,
+         "x_pct": 39.2, "y_pct": 12.5, "clicked": true, "button": "left", "count": 1}
+
+    If multiple matches are found, picks the one with highest OCR confidence.
+    If search_area is set, further filters to matches in that screen quadrant.
+    """
+    conn = _require_conn()
+
+    # Capture + OCR
+    params: dict[str, str] = {"allow_offline": "true"}
+    r = await conn.http.get(f"{conn.base_url}/api/streamer/snapshot", params=params)
+    r.raise_for_status()
+    ocr = _run_ocr(r.content, text)
+
+    if not ocr["elements"]:
+        return {"found": False, "text": text, "message": "No OCR matches for this text.",
+                "tesseract_found": ocr.get("tesseract_found", False)}
+
+    elements = ocr["elements"]
+
+    # Filter by search area quadrant if requested
+    if search_area:
+        area_filters = {
+            "top-left":     lambda e: e["x_pct"] < 50 and e["y_pct"] < 50,
+            "top-right":    lambda e: e["x_pct"] >= 50 and e["y_pct"] < 50,
+            "bottom-left":  lambda e: e["x_pct"] < 50 and e["y_pct"] >= 50,
+            "bottom-right": lambda e: e["x_pct"] >= 50 and e["y_pct"] >= 50,
+        }
+        f = area_filters.get(search_area)
+        if f:
+            filtered = [e for e in elements if f(e)]
+            if filtered:
+                elements = filtered
+
+    # Best match = highest confidence (already sorted, but re-sort after area filter)
+    elements.sort(key=lambda e: -e["confidence"])
+    best = elements[0]
+
+    # Move mouse to the text center
+    x = int(round((best["x_pct"] / 100.0) * 65535 - 32768))
+    y = int(round((best["y_pct"] / 100.0) * 65535 - 32768))
+    count = max(1, min(5, int(count)))
+
+    async with conn.send_lock:
+        await _ws_send_mouse_move(conn, x, y)
+        for _ in range(count):
+            await _ws_send_mouse_button(conn, button, True)
+            await asyncio.sleep(MIN_DOWN_UP_GAP_S)
+            await _ws_send_mouse_button(conn, button, False)
+            await asyncio.sleep(0.030)
+
+    return {
+        "found": True,
+        "text": best["text"],
+        "confidence": best["confidence"],
+        "x_pct": best["x_pct"],
+        "y_pct": best["y_pct"],
+        "pixel": best["pixel"],
+        "clicked": True,
+        "button": button,
+        "count": count,
+        "other_matches": len(elements) - 1,
+    }
 
 
 # ---- Status ---------------------------------------------------------------

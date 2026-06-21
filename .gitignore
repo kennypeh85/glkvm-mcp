@@ -1,23 +1,33 @@
 # Python
 __pycache__/
 *.py[cod]
-*.class
 *.egg-info/
-.venv/
-venv/
-build/
 dist/
+build/
 .eggs/
 
-# uv
-.uv/
+# Environment
+.env
+.venv/
+venv/
 
-# IDE / OS
+# IDE
 .vscode/
 .idea/
+
+# OS
 .DS_Store
 Thumbs.db
 
-# Local backups created during install
-*.bak
-*.bak.*
+# Secrets / sensitive
+*.key
+*.pem
+config.yaml
+
+# Screenshots (temp files)
+*.jpg
+*.png
+screenshot_*.jpeg
+
+# Calibration outputs
+calibration_*.png
